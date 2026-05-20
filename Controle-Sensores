@@ -1,0 +1,225 @@
+#include "ThingSpeak.h"
+#include <WiFi.h>
+
+// ===================== LEDs ALERTA =====================
+#define LED_AVISO 14
+#define LED_VERMELHO 12
+
+// Limites mq135(NOx) =====
+int NOx_AVISO = 100; 
+int NOx_PERIGO = 250;
+
+// ===== LIMITES MQ7 (CO) =====
+int CO_AVISO = 35;
+int CO_PERIGO = 200;
+
+// ===== LIMITES MQ4 (CH4) =====
+int CH4_AVISO = 1000;
+int CH4_PERIGO = 5000;
+
+// ===================== WiFi =====================
+const char* ssid = "####################";//alterar para o nome da rede
+const char* password = "123456";//alterar para a senha da rede
+
+// ===================== ThingSpeak =====================
+const char* apiKey = "VIJCNH5CFJ1CMPB5";
+const long channelID = 3389827;
+
+WiFiClient client;
+
+// ===================== Controle =====================
+unsigned long lastTime = 0;
+const unsigned long interval = 30000;
+
+int led = 2;
+int cont;
+boolean pisca = false;
+
+// ===================== Sensores =====================
+// MQ135 -> NOx
+#define MQ135_PIN 34
+
+// MQ7 -> CO
+#define MQ7_PIN 36
+
+// MQ4 -> CH4
+#define MQ4_PIN 39
+
+// ===================== Média MQ4 =====================
+const int numReadings = 20;
+float CH4Readings[numReadings] = {0};
+int readIndex = 0;
+int validReadings = 0;
+float CH4Total = 0;
+
+// ====================================================
+// SETUP
+// ====================================================
+void setup() {
+  
+  pinMode(led, OUTPUT);
+
+  pinMode(LED_AVISO, OUTPUT);
+  pinMode(LED_VERMELHO, OUTPUT);
+
+  Serial.begin(115200);
+  // CONFIGURAÇÃO ADC ESP32
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+
+  Serial.println("IMT 2026 - Engenharia da Computação");
+ 
+  // WiFi
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  cont = 0;
+
+  Serial.print("Conectando WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+
+    pisca = !pisca;
+    digitalWrite(led, pisca);
+
+    cont++;
+
+    Serial.print("Tentativa: ");
+    Serial.println(cont);
+
+    delay(1000);
+  }
+
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
+
+  Serial.println();
+  Serial.println("WiFi conectado!");
+
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+
+  delay(3000);
+
+  digitalWrite(led, LOW);
+
+  // ThingSpeak
+  ThingSpeak.begin(client);
+}
+
+// ====================================================
+// LOOP
+// ====================================================
+void loop() {
+
+  unsigned long currentTime = millis();
+
+  // Pisca LED
+  digitalWrite(led, HIGH);
+  delay(100);
+
+  digitalWrite(led, LOW);
+  delay(100);
+  
+  // ===================== LEITURAS =====================
+
+  // MQ135 - NOx
+  float NOx = analogRead(MQ135_PIN)+25;
+  
+  // MQ7 - CO
+  float leitura_CO = analogRead(MQ7_PIN);
+leitura_CO = leitura_CO* 1.62 - 3000;
+  if (leitura_CO < 0) {
+    leitura_CO=0;
+  }
+  // MQ4 - CH4
+  float CH4 = analogRead(MQ4_PIN)*2.6626;
+
+  // Média móvel do MQ4
+  CH4Total -= CH4Readings[readIndex];
+  CH4Readings[readIndex] = CH4;
+  CH4Total += CH4;
+
+  readIndex = (readIndex + 1) % numReadings;//Atualiza o índice circular da média móvel
+  if (validReadings < numReadings) {
+    validReadings++;
+}
+  float CH4Media = CH4Total / validReadings;
+  // Alerta
+  bool aviso = false;
+  bool perigo = false;
+
+  if (NOx >= NOx_PERIGO || leitura_CO >= CO_PERIGO || CH4Media >=CH4_PERIGO) {
+  perigo = true;
+  }
+  else if (
+   (NOx >= NOx_AVISO && NOx < NOx_PERIGO) ||
+   (leitura_CO >= CO_AVISO && leitura_CO < CO_PERIGO) ||
+   (CH4Media >= CH4_AVISO && CH4Media < CH4_PERIGO)
+  ) {
+  aviso=true;
+  }
+
+  if (perigo) {
+
+    digitalWrite(LED_VERMELHO, HIGH);
+    digitalWrite(LED_AVISO, LOW);
+    }
+  else if (aviso) {
+
+    digitalWrite(LED_AVISO, HIGH);
+    digitalWrite(LED_VERMELHO, LOW);
+    }
+  else {
+
+    digitalWrite(LED_AVISO, LOW);
+    digitalWrite(LED_VERMELHO, LOW);
+    }
+  // ===================== SERIAL =====================
+
+  Serial.println("===== LEITURA DOS SENSORES =====");
+
+  Serial.print("NOx (MQ135): ");
+  Serial.println(NOx);
+
+  Serial.print("CO (MQ7): ");
+  Serial.println(leitura_CO);
+
+  Serial.print("CH4 (MQ4): ");
+  Serial.println(CH4Media);
+
+  Serial.println("===============================");
+
+  // ===================== THINGSPEAK =====================
+
+  if (currentTime - lastTime >= interval) {
+
+    lastTime = currentTime;
+
+    // Campo 1 -> CO2
+    ThingSpeak.setField(1, NOx);
+
+    // Campo 2 -> CO
+    ThingSpeak.setField(2, leitura_CO);
+
+    // Campo 3 -> CH4
+    ThingSpeak.setField(3, CH4Media);
+
+    int status = ThingSpeak.writeFields(channelID, apiKey);
+
+    if (status == 200) {
+
+      Serial.println("Dados enviados com sucesso!");
+
+      delay(2000);
+
+    } else {
+
+      Serial.print("Erro envio: ");
+      Serial.println(status);
+
+      delay(2000);
+    }
+  }
+  }
+
